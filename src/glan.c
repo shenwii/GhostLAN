@@ -22,38 +22,62 @@
 #include "crc32.h"
 
 //don't change this
+//不要更改这个参数
 #define TUN_MTU 1420
+//默认端口
 #define DEFAULT_PORT 5578
-#define BUFFER_LENGTH 1456
+//UDP包的buffer长度
+#define BUFFER_LENGTH TUN_MTU + 36
+//IO复用数
 #define IO_MUXING_NUM 2
+//IO复用超时时间
 #define IO_MUXING_TIMEOUT 5000
+//心跳包发送间隔
 #define HEARTBEAT_SNEDTIME 10
+//心跳包超时判断
 #define HEARTBEAT_TIMEOUT 30
 
+//心跳包类型
 #define TUNNEL_TPYE_HEARTBEAT 0x01
+//数据类型
 #define TUNNEL_TPYE_DATA 0x02
 
-typedef struct 
+//tun网卡构造体
+typedef struct
 {
+    //fd
     int fd;
+    //ipv4地址
     struct in_addr ip4_addr;
+    //ipv4子网掩码
     struct in_addr ip4_netmask;
+    //网卡MAC地址
     struct ether_addr eth_addr;
 } tun_device_t;
 
+//路由表构造体
 typedef struct route_s
 {
+    //ipv4地址
     struct in_addr ip4_addr;
+    //fd的地址
     struct sockaddr_storage fd_addr;
+    //心跳包时间
     time_t heartbeat_time;
+    //下一个节点
     struct route_s *next;
 } route_t;
 
+//隧道协议构造体
 typedef struct
 {
+    //类型
     unsigned char type;
+    //udp ip版本
     char udp_ip_version;
+    //数据长度
     uint16_t data_len;
+    //包总长度
     uint16_t total_len;
     //key crc32
     union
@@ -61,18 +85,17 @@ typedef struct
         unsigned char crc32[4];
         uint32_t crc32_i;
     } key_u;
+    //ipv4地址
     struct in_addr saddr;
+    //udp ip长度
     char udp_ip[16];
+    //udp端口
     uint16_t udp_port;
 } __attribute__((__packed__)) tunnel_hdr_t;
 
-static char *__address_str4(struct in_addr *in_addr)
-{
-    static char addr[16];
-    inet_ntop(AF_INET, in_addr, addr, 16);
-    return addr;
-}
-
+/**
+ * 发送通道数据
+ */
 static void __send_tunnel_data(int fd, struct sockaddr_storage *addr, tunnel_hdr_t *tunnel_hdr, unsigned char *aes_key, char *buf, int len)
 {
     tunnel_hdr->type = TUNNEL_TPYE_DATA;
@@ -86,6 +109,9 @@ static void __send_tunnel_data(int fd, struct sockaddr_storage *addr, tunnel_hdr
     sendto(fd, send_buf, sizeof(tunnel_hdr_t) + tunnel_hdr->total_len, MSG_NOSIGNAL, (struct sockaddr*) addr, sizeof(struct sockaddr_storage));
 }
 
+/**
+ * 发送心跳包
+ */
 static void __send_tunnel_heartbeat(int fd, struct sockaddr_storage *addr, tunnel_hdr_t *tunnel_hdr)
 {
     tunnel_hdr->type = TUNNEL_TPYE_HEARTBEAT;
@@ -94,15 +120,9 @@ static void __send_tunnel_heartbeat(int fd, struct sockaddr_storage *addr, tunne
     sendto(fd, tunnel_hdr, sizeof(tunnel_hdr_t), MSG_NOSIGNAL, (struct sockaddr*) addr, sizeof(struct sockaddr_storage));
 }
 
-// static void __send_udp_data(int fd, struct sockaddr_storage *addr, tunnel_hdr_t *tunnel_hdr, char type, char *aes_key, char buf, int len)
-// {
-//     tunnel_hdr->type = type;
-//     if(type == TUNNEL_TPYE_DATA)
-//         __send_tunnel_data(fd, addr, tunnel_hdr, aes_key, buf, len);
-//     else
-//         __send_tunnel_heartbeat(fd, addr, tunnel_hdr);
-// }
-
+/**
+ * 设置udp客户端的信息
+ */
 static void __set_tunnel_hdr_udp_info(tunnel_hdr_t *tunnel_hdr, struct sockaddr_storage *addr)
 {
     if(addr->ss_family == AF_INET)
@@ -119,13 +139,22 @@ static void __set_tunnel_hdr_udp_info(tunnel_hdr_t *tunnel_hdr, struct sockaddr_
     }
 }
 
+/**
+ * 死循环跑服务
+ */
 static void __start_forever(tun_device_t *tun_device, char *key , char server_mode, struct sockaddr_storage *server_addr, struct sockaddr_storage *listen_addr)
 {
+    //从tun虚拟网卡接收的buffer
     char tun_buffer[TUN_MTU];
+    //UDP传输的buffer
     char buffer[BUFFER_LENGTH];
+    //临时buffer
     char tmp_buffer[BUFFER_LENGTH * 2];
+    //临时buffer长
     size_t tmp_buffer_len = 0;
+    //最后一次心跳包发送时间
     time_t last_heartbeat_time = 0;
+    //临时记录ipv4地址字符串用的变量
     char addr_ipv4_str[16];
 #if defined __linux__ && !defined SELECT
     //epoll fd
@@ -142,10 +171,13 @@ static void __start_forever(tun_device_t *tun_device, char *key , char server_mo
     memset(&timeout_s, 0, sizeof(struct timeval));
     timeout_s.tv_usec = IO_MUXING_TIMEOUT * 1000;
 #endif
+    //aes密钥buffer，先初始化0
     unsigned char key_buffer[AES_KEY_LEN / 8] = {0};
+    //将密钥复制进buffer
     memcpy(key_buffer, key, strlen(key));
-    //calculate the key crc32
+    //计算密钥的crc32值
     uint32_t key_crc32 = CRC32(key_buffer, AES_KEY_LEN / 8);
+    //隧道协议
     tunnel_hdr_t tunnel_hdr;
     tunnel_hdr.saddr = tun_device->ip4_addr;
     tunnel_hdr.key_u.crc32_i = htonl(key_crc32);
@@ -164,6 +196,7 @@ static void __start_forever(tun_device_t *tun_device, char *key , char server_mo
         }
         if(listen_addr->ss_family == AF_INET6)
         {
+            //如果是ipv6地址，则添加ipv6 only的flag
             if(setsockopt(udp_fd, IPPROTO_IPV6, IPV6_V6ONLY, &on, sizeof(on)) != 0)
                 return;
         }
@@ -212,6 +245,7 @@ static void __start_forever(tun_device_t *tun_device, char *key , char server_mo
 #endif
         if(server_mode)
         {
+            //服务端，这里将检测每个客户端的心跳是否超时，超时则移除客户端
             route_t *pre_node = NULL;
             route_t *tmp_node;
             tmp_node = route_table;
@@ -241,6 +275,7 @@ static void __start_forever(tun_device_t *tun_device, char *key , char server_mo
         }
         else
         {
+            //客户端，判断最后一次心跳包时间，如果超时了再发
             if(difftime(time(NULL), last_heartbeat_time) > HEARTBEAT_SNEDTIME)
             {
                 __send_tunnel_heartbeat(udp_fd, server_addr, &tunnel_hdr);
@@ -250,7 +285,7 @@ static void __start_forever(tun_device_t *tun_device, char *key , char server_mo
 #if defined __linux__ && !defined SELECT
         for(int i = 0; i < wait_count; i++)
         {
-            //events although there is still the possibility of EPOLLERR and EPOLLHUP, it should not be possible here.
+            //这里应该不会出现socket错误
             if(!(events[i].events & EPOLLIN))
                 continue;
             event_fd = events[i].data.fd;
@@ -265,65 +300,85 @@ static void __start_forever(tun_device_t *tun_device, char *key , char server_mo
 #endif
             if(event_fd == tun_device->fd)
             {
+                //读取tun设备的字节流
+                //这里是从以太帧协议开始的
                 int r = read(event_fd, tun_buffer, TUN_MTU);
                 if(r <= sizeof(struct ether_header))
                     continue;
                 struct ether_header *eth_hdr = (struct ether_header *) tun_buffer;
                 if(ntohs(eth_hdr->ether_type) == ETHERTYPE_IP)
                 {
+                    //如果是IPv4的以太帧
+                    //下一层就是IP协议
                     struct iphdr *iphdr = (struct iphdr *) (tun_buffer + sizeof(struct ether_header));
-                    //tun device, only ipv4 packets are processed, ipv6 packets are discarded
+                    //一方万一判断下，IP协议的版本是否为4
                     if(iphdr->version != 4)
                         continue;
-                    if(server_mode == 0)
+                    //首先判断目的地IP是否是同一网段的
+                    if((iphdr->daddr & tun_device->ip4_netmask.s_addr) == (tun_device->ip4_addr.s_addr & tun_device->ip4_netmask.s_addr))
                     {
-                        LOG_INFO("send ipv4 package to server\n");
-                        __send_tunnel_data(udp_fd, server_addr, &tunnel_hdr, key_buffer, tun_buffer, r);
+                        //同样网段的从路由表中查询
+                        route_t *tmp_node;
+                        char has_client = 0;
+                        for(tmp_node = route_table; tmp_node != NULL; tmp_node = tmp_node->next)
+                        {
+                            if(tmp_node->ip4_addr.s_addr == iphdr->daddr)
+                            {
+                                //查询到了则直接发送
+                                inet_ntop(AF_INET, &tmp_node->ip4_addr, addr_ipv4_str, 16);
+                                LOG_INFO("send ipv4 package to client(%s)\n", addr_ipv4_str);
+                                __send_tunnel_data(udp_fd, &tmp_node->fd_addr, &tunnel_hdr, key_buffer, tun_buffer, r);
+                            }
+                        }
+                        if(!has_client)
+                        {
+                            //如果没找到
+                            if(server_mode == 1)
+                            {
+                                //服务端则直接丢弃这个包
+                                inet_ntop(AF_INET, (struct in_addr *) &iphdr->daddr, addr_ipv4_str, 16);
+                                LOG_INFO("client %s is not exists\n", addr_ipv4_str);
+                            }
+                            else
+                            {
+                                //客户端则转发给服务端
+                                __send_tunnel_data(udp_fd, server_addr, &tunnel_hdr, key_buffer, tun_buffer, r);
+                            }
+                        }
                     }
                     else
                     {
-                        //if it is the server side, then first determine whether the destination IP is the same virtual LAN
-                        if((iphdr->daddr & tun_device->ip4_netmask.s_addr) == (tun_device->ip4_addr.s_addr & tun_device->ip4_netmask.s_addr))
+                        //如果不是同一个网段的
+                        if(server_mode == 1)
                         {
-                            route_t *tmp_node;
-                            char has_client = 0;
-                            for(tmp_node = route_table; tmp_node != NULL; tmp_node = tmp_node->next)
-                            {
-                                if(tmp_node->ip4_addr.s_addr == iphdr->daddr)
-                                {
-                                    inet_ntop(AF_INET, &tmp_node->ip4_addr, addr_ipv4_str, 16);
-                                    LOG_INFO("send ipv4 package to client(%s)\n", addr_ipv4_str);
-                                    __send_tunnel_data(udp_fd, &tmp_node->fd_addr, &tunnel_hdr, key_buffer, tun_buffer, r);
-                                }
-                            }
-                            if(!has_client)
-                            {
-                                //if the client is not found, it is discarded
-                                LOG_INFO("client %s is not exists\n", __address_str4((struct in_addr *) &iphdr->daddr));
-                            }
+                            //服务端则丢弃这个包
+                            LOG_DEBUG("not the same lan package, droped\n");
                         }
                         else
                         {
-                            //if it is not from the same LAN, it is discarded
-                            LOG_DEBUG("not the same lan package, droped\n");
+                            //客户端转发给服务端
+                            __send_tunnel_data(udp_fd, server_addr, &tunnel_hdr, key_buffer, tun_buffer, r);
                         }
                     }
                 }
                 else if(ntohs(eth_hdr->ether_type) == ETHERTYPE_IPV6)
                 {
+                    //IPv6包直接丢弃
                     LOG_INFO("ipv6 package drop\n");
                 }
                 else if(ntohs(eth_hdr->ether_type) == ETHERTYPE_ARP)
                 {
+                    //如果是ARP的以太帧
                     struct ether_arp *eth_arp;
                     eth_arp = (struct ether_arp *) (tun_buffer + sizeof(struct ether_header));
                     if(server_mode == 0)
                     {
-                        LOG_DEBUG("send arp package to server\n");
+                        //客户端直接转发给服务端
                         __send_tunnel_data(udp_fd, server_addr, &tunnel_hdr, key_buffer, tun_buffer, r);
                     }
                     else
                     {
+                        //服务端，从路由表中查询，转发给目的IP的客户端
                         route_t *tmp_node;
                         for(tmp_node = route_table; tmp_node != NULL; tmp_node = tmp_node->next)
                         {
@@ -339,6 +394,7 @@ static void __start_forever(tun_device_t *tun_device, char *key , char server_mo
                 }
                 else
                 {
+                    //其他的以太帧暂时不支持
                     LOG_WARN("ether type 0x%04x is not supported\n", eth_hdr->ether_type);
                 }
             }
@@ -348,6 +404,7 @@ static void __start_forever(tun_device_t *tun_device, char *key , char server_mo
                 size_t handle_buf_len;
                 struct sockaddr_storage client_addr;
                 socklen_t addr_len = sizeof(client_addr);
+                //从UDP接收字节流
                 int r = recvfrom(event_fd, buffer, BUFFER_LENGTH, MSG_NOSIGNAL, (struct sockaddr *) &client_addr, &addr_len);
                 if(tmp_buffer_len == 0)
                 {
@@ -362,9 +419,11 @@ static void __start_forever(tun_device_t *tun_device, char *key , char server_mo
                 }
                 while(1)
                 {
+                    //循环处理包
                     if(handle_buf_len < sizeof(tunnel_hdr_t))
                         break;
                     tunnel_hdr_t *recv_tunnel_hdr = (tunnel_hdr_t *) handle_buf;
+                    //如果密钥错误，则丢弃包
                     if(ntohl(recv_tunnel_hdr->key_u.crc32_i) != key_crc32)
                     {
                         LOG_INFO("incorrect key\n");
@@ -373,9 +432,13 @@ static void __start_forever(tun_device_t *tun_device, char *key , char server_mo
                     }
                     if(recv_tunnel_hdr->type == TUNNEL_TPYE_HEARTBEAT)
                     {
+                        //如果是心跳包
                         LOG_DEBUG("recv heartbeat package\n");
                         if(server_mode == 1)
                         {
+                            //服务端，从路由表中查询客户端
+                            //如果查询到，则更新客户端信息
+                            //如果没查询到，则新建
                             route_t *tmp_node;
                             route_t *last_socket = NULL;
                             char has_client = 0;
@@ -417,21 +480,25 @@ static void __start_forever(tun_device_t *tun_device, char *key , char server_mo
                     }
                     else if(recv_tunnel_hdr->type == TUNNEL_TPYE_DATA)
                     {
+                        //数据包
                         LOG_DEBUG("recv data package\n");
+                        //如果数据包长度错误，则丢弃
                         if(recv_tunnel_hdr->total_len < recv_tunnel_hdr->data_len || recv_tunnel_hdr->data_len == 0)
                         {
                             handle_buf_len = 0;
                             break;
                         }
+                        //长度不足，则继续读取
                         if(handle_buf_len < recv_tunnel_hdr->total_len + sizeof(tunnel_hdr_t))
                             break;
                         unsigned char aes_buf[recv_tunnel_hdr->total_len];
+                        //解密失败也丢弃
                         if(aes_decrypt((unsigned char *) handle_buf + sizeof(tunnel_hdr_t), AES_ENCRYPT_LEN(recv_tunnel_hdr->data_len), aes_buf, key_buffer) != 0)
                         {
                             handle_buf_len = 0;
                             break;
                         }
-                        //FIXME
+                        //数据长度错误，丢弃
                         if(recv_tunnel_hdr->data_len < sizeof(struct ether_header))
                         {
                             handle_buf_len = 0;
@@ -439,7 +506,9 @@ static void __start_forever(tun_device_t *tun_device, char *key , char server_mo
                         }
                         struct ether_header *eth_hdr = (struct ether_header *) aes_buf;
                         if(ntohs(eth_hdr->ether_type) == ETHERTYPE_IP)
-                        {
+                        {   
+                            //如果是IPv4的以太帧
+                            //下一层就是IP协议
                             LOG_DEBUG("recv ipv4 package\n");
                             if(recv_tunnel_hdr->data_len < sizeof(struct ether_header) + sizeof(struct iphdr))
                             {
@@ -447,11 +516,13 @@ static void __start_forever(tun_device_t *tun_device, char *key , char server_mo
                                 break;
                             }
                             struct iphdr *iphdr = (struct iphdr *) (aes_buf + sizeof(struct ether_header));
+                            //以防万一，判断IPv4的协议版本是否为4,如果不是则丢弃
                             if(iphdr->version != 4)
                             {
                                 handle_buf_len = 0;
                                 break;
                             }
+                            //如果目的地IP就是自己，则直接写给tun设备
                             if(iphdr->daddr == tun_device->ip4_addr.s_addr)
                             {
                                 LOG_INFO("send data package to tun\n");
@@ -459,31 +530,51 @@ static void __start_forever(tun_device_t *tun_device, char *key , char server_mo
                             }
                             else
                             {
+                                //如果目的地IP不是自己
                                 if(server_mode == 1)
                                 {
-                                    route_t *tmp_node;
-                                    // char has_client = 0;
-                                    for(tmp_node = route_table; tmp_node != NULL; tmp_node = tmp_node->next)
+                                    //如果是服务端
+                                    if((iphdr->daddr & tun_device->ip4_netmask.s_addr) == (tun_device->ip4_addr.s_addr & tun_device->ip4_netmask.s_addr))
                                     {
-                                        if(tmp_node->ip4_addr.s_addr == iphdr->daddr)
+                                        //如果目的地IP是同一局域网的，则去路由表查询是否有客户端IP等于目的地IP
+                                        //查询到则转发过去
+                                        //查询不到则丢弃
+                                        route_t *tmp_node;
+                                        char has_client = 0;
+                                        for(tmp_node = route_table; tmp_node != NULL; tmp_node = tmp_node->next)
                                         {
-                                            inet_ntop(AF_INET, &tmp_node->ip4_addr, addr_ipv4_str, 16);
-                                            LOG_INFO("forward data package to other client(%s)\n", addr_ipv4_str);
-                                            sendto(udp_fd, handle_buf, handle_buf_len, MSG_NOSIGNAL, (struct sockaddr *) &tmp_node->fd_addr, sizeof(struct sockaddr_storage));
+                                            if(tmp_node->ip4_addr.s_addr == iphdr->daddr)
+                                            {
+                                                has_client = 1;
+                                                inet_ntop(AF_INET, &tmp_node->ip4_addr, addr_ipv4_str, 16);
+                                                LOG_INFO("forward data package to other client(%s)\n", addr_ipv4_str);
+                                                sendto(udp_fd, handle_buf, handle_buf_len, MSG_NOSIGNAL, (struct sockaddr *) &tmp_node->fd_addr, sizeof(struct sockaddr_storage));
+                                            }
+                                        }
+                                        if(!has_client)
+                                        {
+                                            inet_ntop(AF_INET, (struct in_addr *) &iphdr->daddr, addr_ipv4_str, 16);
+                                            LOG_INFO("client %s is not exists\n", addr_ipv4_str);
                                         }
                                     }
-
+                                    else
+                                    {
+                                        //如果不是同一局域网，则写给tun设备
+                                        write(tun_device->fd, aes_buf, recv_tunnel_hdr->data_len);
+                                    }
                                 }
                             }
-
                         }
                         else if(ntohs(eth_hdr->ether_type) == ETHERTYPE_IPV6)
                         {
+                            //IPv6包丢弃
                             LOG_INFO("ipv6 package drop\n");
                         }
                         else if(ntohs(eth_hdr->ether_type) == ETHERTYPE_ARP)
                         {
+                            //如果是ARP的以太帧
                             LOG_DEBUG("recv arp package\n");
+                            //如果数据包长度错误，则丢弃
                             if(recv_tunnel_hdr->data_len < sizeof(struct ether_header) + sizeof(struct ether_arp))
                             {
                                 handle_buf_len = 0;
@@ -491,23 +582,98 @@ static void __start_forever(tun_device_t *tun_device, char *key , char server_mo
                             }
                             struct ether_arp *eth_arp = (struct ether_arp *) (aes_buf + sizeof(struct ether_header));
                             LOG_INFO("send data package to tun\n");
+                            //ARP包，先写给tun设备
+                            //如果错误的包，tun设备会自行丢弃
                             write(tun_device->fd, aes_buf, recv_tunnel_hdr->data_len);
-                            if(ntohs(eth_arp->arp_op) == ARPOP_REQUEST && server_mode == 1)
+                            if(server_mode == 1)
                             {
+                                //如果是服务端，则去路由表查询
+                                //查询到，则转发过去，转发的时候，把客户端UDP信息一起带过去
+                                //查询不到，则丢弃
                                 route_t *tmp_node;
-                                // char has_client = 0;
                                 for(tmp_node = route_table; tmp_node != NULL; tmp_node = tmp_node->next)
                                 {
-                                    if(memcmp(&tmp_node->ip4_addr, eth_arp->arp_spa, 4) != 0)
+                                    if(memcmp(&tmp_node->ip4_addr, eth_arp->arp_tpa, 4) == 0)
                                     {
+                                        __set_tunnel_hdr_udp_info(recv_tunnel_hdr, &client_addr);
                                         LOG_INFO("forward data package to other client(%s)\n", addr_ipv4_str);
-                                        sendto(udp_fd, handle_buf, handle_buf_len, MSG_NOSIGNAL, (struct sockaddr *) &tmp_node->fd_addr, sizeof(struct sockaddr_storage));
+                                        __send_tunnel_data(udp_fd, &tmp_node->fd_addr, recv_tunnel_hdr, key_buffer, (char *) aes_buf, recv_tunnel_hdr->data_len);
+                                    }
+                                }
+                            }
+                            else
+                            {
+                                //如果是客户端
+                                //如果目的地IP等于tun网卡IP，并且udp_ip_version不等于0（udp_ip_version等于0意味着这个包是从server的tun设备发出）
+                                if(memcmp(&tun_device->ip4_addr, eth_arp->arp_tpa, 4) == 0 && recv_tunnel_hdr->udp_ip_version != 0)
+                                {
+                                    //这里去查询客户端路由表
+                                    //如果存在，则更新客户端信息
+                                    //如果不存在，则新建客户端信息
+                                    route_t *tmp_node;
+                                    route_t *last_socket = NULL;
+                                    char has_client = 0;
+                                    for(tmp_node = route_table; tmp_node != NULL; tmp_node = tmp_node->next)
+                                    {
+                                        if(tmp_node->ip4_addr.s_addr == recv_tunnel_hdr->saddr.s_addr)
+                                        {
+                                            if(recv_tunnel_hdr->udp_ip_version == 4)
+                                            {
+                                                tmp_node->fd_addr.ss_family = AF_INET;
+                                                memcpy(&((struct sockaddr_in *) &tmp_node)->sin_addr, recv_tunnel_hdr->udp_ip, 4);
+                                                ((struct sockaddr_in *) &tmp_node)->sin_port = recv_tunnel_hdr->udp_port;
+                                            }
+                                            else
+                                            {
+                                                tmp_node->fd_addr.ss_family = AF_INET6;
+                                                memcpy(&((struct sockaddr_in6 *) &tmp_node)->sin6_addr, recv_tunnel_hdr->udp_ip, 16);
+                                                ((struct sockaddr_in6 *) &tmp_node)->sin6_port = recv_tunnel_hdr->udp_port;
+                                            }
+                                            __send_tunnel_heartbeat(udp_fd, &tmp_node->fd_addr, &tunnel_hdr);
+                                            has_client = 1;
+                                            break;
+                                        }
+                                        last_socket = tmp_node;
+                                    }
+                                    if(!has_client)
+                                    {
+                                        tmp_node = malloc(sizeof(route_t));
+                                        if(tmp_node == NULL)
+                                        {
+                                            LOG_ERR("malloc failed\n");
+                                            abort();
+                                        }
+                                        if(recv_tunnel_hdr->udp_ip_version == 4)
+                                        {
+                                            tmp_node->fd_addr.ss_family = AF_INET;
+                                            memcpy(&((struct sockaddr_in *) &tmp_node)->sin_addr, recv_tunnel_hdr->udp_ip, 4);
+                                            ((struct sockaddr_in *) &tmp_node)->sin_port = recv_tunnel_hdr->udp_port;
+                                        }
+                                        else
+                                        {
+                                            tmp_node->fd_addr.ss_family = AF_INET6;
+                                            memcpy(&((struct sockaddr_in6 *) &tmp_node)->sin6_addr, recv_tunnel_hdr->udp_ip, 16);
+                                            ((struct sockaddr_in6 *) &tmp_node)->sin6_port = recv_tunnel_hdr->udp_port;
+                                        }
+                                        __send_tunnel_heartbeat(udp_fd, &tmp_node->fd_addr, &tunnel_hdr);
+                                        tmp_node->ip4_addr = recv_tunnel_hdr->saddr;
+                                        tmp_node->next = NULL;
+                                        inet_ntop(AF_INET, &tmp_node->ip4_addr, addr_ipv4_str, 16);
+                                        if(route_table == NULL)
+                                        {
+                                            route_table = tmp_node;
+                                        }
+                                        else
+                                        {
+                                            last_socket->next = tmp_node;
+                                        }
                                     }
                                 }
                             }
                         }
                         else
                         {
+                            //其他的以太帧不支持
                             LOG_WARN("ether type 0x%04x is not supported\n", eth_hdr->ether_type);
                         }
                     }
