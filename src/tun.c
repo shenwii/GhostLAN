@@ -94,43 +94,5 @@ int tun_alloc(char *tun_name, char type, struct ifreq *ifr)
         close(fd);
         return -1;
     }
-    // int udp_fd = socket(AF_INET, SOCK_DGRAM, 0);
-    // if(udp_fd <= 0)
-    // {
-    //     close(fd);
-    //     return -1;
-    // }
-    // if(__tun_set_mtu(udp_fd, &ifr, mtu) < 0)
-    // {
-    //     close(udp_fd);
-    //     close(fd);
-    //     return -1;
-    // }
-    // if(__tun_set_ip4(udp_fd, &ifr, ip4_addr) < 0)
-    // {
-    //     close(udp_fd);
-    //     close(fd);
-    //     return -1;
-    // }
-    // if(__tun_set_netmask4(udp_fd, &ifr, ip4_netmask) < 0)
-    // {
-    //     close(udp_fd);
-    //     close(fd);
-    //     return -1;
-    // }
-    // if(__tun_set_up(udp_fd, &ifr) < 0)
-    // {
-    //     close(udp_fd);
-    //     close(fd);
-    //     return -1;
-    // }
-    // if(__tun_get_ether_address(udp_fd, &ifr, eth_addr) < 0)
-    // {
-    //     close(udp_fd);
-    //     close(fd);
-    //     return -1;
-    // }
-
-    // close(udp_fd);
     return fd;
 }
